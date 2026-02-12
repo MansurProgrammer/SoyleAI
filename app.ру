@@ -1,0 +1,334 @@
+import sys
+import numpy as np
+import sounddevice as sd
+import cv2
+import mediapipe as mp
+import torch
+import joblib
+import os
+import json
+from datetime import datetime
+from transformers import Wav2Vec2Processor, Wav2Vec2Model
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, 
+    QComboBox, QHBoxLayout, QFrame, QStackedWidget, QScrollArea
+)
+from PyQt6.QtGui import QFont, QImage, QPixmap, QPainter, QColor, QPen
+from PyQt6.QtCore import Qt, QTimer, QRectF, QVariantAnimation, QEasingCurve, QThread, pyqtSignal
+
+# ================== КОНСТАНТЫ И БД ==================
+LETTERS = ["Ә","Ғ","Қ","Ң","Ө","Ұ","Ү","Һ","І"]
+DB_FILE = "history.json"
+
+ADVICE_MAP = {
+    "Ә": "Ауызды кеңірек ашып, тілдің ұшын төменгі тістерге тіреңіз.",
+    "Ғ": "Тамақты қыспай, дыбысты жұмсақ әрі созылыңқы шығарыңыз.",
+    "Қ": "Тілдің артқы жағын жұмсақ таңдайға нық тигізіңіз.",
+    "Ң": "Дыбысты мұрын арқылы шығаруға тырысыңыз.",
+    "Ө": "Еринді алға қарай созып, дөңгелектеңіз.",
+    "Ұ": "Еринді қатты созбай, дыбысты тереңнен шығарыңыз.",
+    "Ү": "Еринді барынша жиырып, жіңішке айтыңыз.",
+    "Һ": "Дыбысты тек дем шығару арқылы шығарыңыз.",
+    "І": "Езуді сәл тартып, дыбысты қысқа қайырыңыз."
+}
+
+TARGET_MOUTH_OPENNESS = {
+    "Ә": 0.07, "Ғ": 0.03, "Қ": 0.04, "Ң": 0.03, "Ө": 0.05, 
+    "Ұ": 0.03, "Ү": 0.02, "Һ": 0.04, "І": 0.02
+}
+
+def save_to_db(letter, score):
+    data = []
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except: data = []
+    entry = {
+        "letter": letter,
+        "score": int(score),
+        "date": datetime.now().strftime("%d.%m.%Y"),
+        "time": datetime.now().strftime("%H:%M")
+    }
+    data.insert(0, entry)
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+# ================== ПОТОК КАМЕРЫ ==================
+class VideoThread(QThread):
+    change_pixmap_signal = pyqtSignal(np.ndarray)
+    
+    def run(self):
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        while True:
+            ret, frame = cap.read()
+            if ret:
+                self.change_pixmap_signal.emit(frame)
+            else:
+                cap.release()
+                cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+                QThread.msleep(500)
+
+# ================== ЭЛЕМЕНТЫ ИНТЕРФЕЙСА ==================
+class HistoryItem(QFrame):
+    def __init__(self, entry):
+        super().__init__()
+        self.setStyleSheet("QFrame { background: #1C1C1E; border-radius: 15px; border: 1px solid #2C2C2E; margin-bottom: 5px; }")
+        self.setFixedHeight(90)
+        layout = QHBoxLayout(self)
+        char_lbl = QLabel(entry["letter"])
+        char_lbl.setStyleSheet("font-size: 32px; font-weight: bold; color: #3B82F6; min-width: 50px;")
+        dt_layout = QVBoxLayout()
+        time_lbl = QLabel(entry["time"])
+        time_lbl.setStyleSheet("color: #FFF; font-size: 18px; font-weight: bold;")
+        date_lbl = QLabel(entry["date"])
+        date_lbl.setStyleSheet("color: #666; font-size: 12px;")
+        dt_layout.addWidget(time_lbl); dt_layout.addWidget(date_lbl)
+        score_lbl = QLabel(f"{entry['score']}%")
+        color = "#00F260" if entry['score'] > 80 else "#FDC830" if entry['score'] > 50 else "#FF4B2B"
+        score_lbl.setStyleSheet(f"font-size: 24px; font-weight: 900; color: {color};")
+        layout.addWidget(char_lbl); layout.addSpacing(20); layout.addLayout(dt_layout)
+        layout.addStretch(); layout.addWidget(score_lbl)
+
+class HistoryWindow(QWidget):
+    def __init__(self, back_callback):
+        super().__init__()
+        layout = QVBoxLayout(self); layout.setContentsMargins(40, 40, 40, 40)
+        header = QLabel("НӘТИЖЕЛЕР ТАРИХЫ")
+        header.setStyleSheet("font-size: 36px; font-weight: 900; color: white; margin-bottom: 20px;")
+        layout.addWidget(header, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame); self.scroll.setStyleSheet("background: transparent;")
+        self.container = QWidget(); self.list_layout = QVBoxLayout(self.container)
+        self.list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.scroll.setWidget(self.container)
+        layout.addWidget(self.scroll)
+        back_btn = QPushButton("⬅ ҚАЙТУ")
+        back_btn.setFixedSize(200, 50); back_btn.setStyleSheet("background: #252525; color: white; border-radius: 15px;")
+        back_btn.clicked.connect(back_callback); layout.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def refresh(self):
+        for i in reversed(range(self.list_layout.count())): 
+            if self.list_layout.itemAt(i).widget(): self.list_layout.itemAt(i).widget().setParent(None)
+        if os.path.exists(DB_FILE):
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for entry in data[:20]: self.list_layout.addWidget(HistoryItem(entry))
+
+class ArticMap(QLabel):
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(220, 180); self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet("background: #111; border-radius: 15px; border: 1px solid #333; color: #555;")
+        self.setText("Схема\nжүктелуде...")
+    def update_map(self, letter):
+        path = f"assets/{letter}.png"
+        if os.path.exists(path):
+            pix = QPixmap(path).scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.setPixmap(pix)
+        else:
+            self.setPixmap(QPixmap()); self.setText(f"Схема: {letter}")
+
+class VoiceWave(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(40); self.samples = [0] * 60
+    def update_wave(self, level):
+        self.samples.pop(0); self.samples.append(level); self.update()
+    def paintEvent(self, event):
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self.width() / len(self.samples)
+        for i, s in enumerate(self.samples):
+            h = max(2, s * self.height() * 0.9)
+            rect = QRectF(i * w, (self.height() - h) / 2, w - 2, h)
+            p.fillRect(rect, QColor("#3B82F6"))
+
+class CircularScore(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent); self.display_value = 0; self.setMinimumSize(220, 220)
+    def set_score(self, val):
+        self.display_value = val; self.update()
+    def paintEvent(self, event):
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(25, 25, 170, 170)
+        p.setPen(QPen(QColor(40, 40, 45), 15)); p.drawEllipse(rect)
+        if self.display_value < 50: color = QColor("#FF4B2B")
+        elif self.display_value < 80: color = QColor("#FDC830")
+        else: color = QColor("#00F260")
+        pen = QPen(color, 15, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        p.setPen(pen); p.drawArc(rect, 90 * 16, -int(self.display_value * 3.6 * 16))
+        p.setPen(QColor("white")); p.setFont(QFont("Segoe UI Variable", 36, QFont.Weight.Bold))
+        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"{int(self.display_value)}%")
+
+# ================== ОСНОВНОЙ КЛАСС ==================
+class QazaqAI(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setMinimumSize(1150, 850); self.setWindowTitle("SoyleAI PRO")
+        self.is_recording = False; self.camera_hidden = False; self.audio_data = []; self.lip_activity = []
+        self.current_vol = 0; self.last_final_score = 0
+        
+        self.models_loaded = False
+        try:
+            if os.path.exists("letter_classifier.pkl"):
+                self.processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
+                self.wav2vec = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base").eval()
+                self.clf_audio = joblib.load("letter_classifier.pkl"); self.models_loaded = True
+        except: pass
+
+        self.thread = VideoThread()
+        self.thread.change_pixmap_signal.connect(self.process_frame)
+        self.thread.start()
+
+        self.face_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
+        self.score_ui = CircularScore(); self.v_wave = VoiceWave(); self.artic_map = ArticMap()
+        self.init_ui()
+        self.wave_timer = QTimer()
+        self.wave_timer.timeout.connect(lambda: self.v_wave.update_wave(self.current_vol if self.is_recording else 0))
+        self.wave_timer.start(30)
+
+    def init_ui(self):
+        self.setStyleSheet("""
+            QWidget { background-color: #0A0A0C; color: #F0F0F0; font-family: 'Segoe UI Variable', sans-serif; }
+            QLabel { font-size: 16px; }
+            QPushButton { border-radius: 12px; font-weight: bold; font-size: 15px; padding: 10px; }
+            QComboBox { background: #1C1C1E; border: 1px solid #2C2C2E; border-radius: 8px; padding: 8px; font-size: 16px; min-width: 150px; }
+            QFrame#SidePanel { background: #161618; border-radius: 25px; border: 1px solid #252525; }
+        """)
+        self.layout = QVBoxLayout(self); self.stack = QStackedWidget()
+        
+        # Меню - ИЗМЕНЕНО НАЗВАНИЕ
+        menu = QWidget(); ml = QVBoxLayout(menu); ml.addStretch(2)
+        title = QLabel("SoyleAI"); title.setStyleSheet("font-size: 90px; font-weight: 900; color: #3B82F6;")
+        ml.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
+        subtitle = QLabel("Интеллектуалды артикуляция тренажеры"); subtitle.setStyleSheet("color: #666; font-size: 18px; margin-bottom: 30px;")
+        ml.addWidget(subtitle, alignment=Qt.AlignmentFlag.AlignCenter)
+        btn_start = QPushButton("ЖҰМЫСТЫ БАСТАУ"); btn_start.setFixedSize(340, 80)
+        btn_start.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3B82F6, stop:1 #2563EB); border-radius: 20px; font-size: 20px;")
+        btn_start.clicked.connect(lambda: self.stack.setCurrentIndex(1)); ml.addWidget(btn_start, alignment=Qt.AlignmentFlag.AlignCenter)
+        btn_history = QPushButton("ТАРИХТЫ КӨРУ"); btn_history.setFixedSize(340, 50)
+        btn_history.setStyleSheet("background: #1C1C1E; border: 1px solid #333; color: #AAA; margin-top: 10px;")
+        btn_history.clicked.connect(self.show_history); ml.addWidget(btn_history, alignment=Qt.AlignmentFlag.AlignCenter)
+        ml.addStretch(3)
+        
+        # Приложение
+        app_page = QWidget(); al = QHBoxLayout(app_page); al.setContentsMargins(20, 20, 20, 20)
+        left = QVBoxLayout()
+        self.live_hint = QLabel("ЖАЗУДЫ БАСТАҢЫЗ"); self.live_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_hint.setStyleSheet("font-size: 18px; font-weight: bold; color: #555; background: #111; border-radius: 10px; padding: 5px;")
+        left.addWidget(self.live_hint)
+        self.v_lbl = QLabel(); self.v_lbl.setFixedSize(760, 540); self.v_lbl.setStyleSheet("background: #000; border-radius: 30px; border: 2px solid #222;")
+        left.addWidget(self.v_lbl); left.addWidget(self.v_wave)
+        self.cam_btn = QPushButton("📷 КАМЕРАНЫ ЖАБУ / АШУ"); self.cam_btn.setStyleSheet("background: #252525; color: white;")
+        self.cam_btn.clicked.connect(self.toggle_cam); left.addWidget(self.cam_btn)
+        al.addLayout(left, 7)
+        
+        panel_frame = QFrame(); panel_frame.setObjectName("SidePanel")
+        panel_layout = QVBoxLayout(panel_frame); panel_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_widget = QWidget(); pl = QVBoxLayout(scroll_widget); pl.setContentsMargins(20, 30, 20, 30); pl.setSpacing(15)
+        pl.addWidget(QLabel("ТАҢДАЛҒАН ӘРІП:"), alignment=Qt.AlignmentFlag.AlignCenter)
+        self.box = QComboBox(); self.box.addItems(LETTERS); pl.addWidget(self.box)
+        self.rec_btn = QPushButton("ЖАЗУДЫ БАСТАУ"); self.rec_btn.setCheckable(True); self.rec_btn.setFixedHeight(75)
+        self.rec_btn.setStyleSheet("QPushButton { background: #3B82F6; border-radius: 18px; } QPushButton:checked { background: #EF4444; }")
+        self.rec_btn.clicked.connect(self.toggle_rec); pl.addWidget(self.rec_btn)
+        pl.addWidget(self.score_ui, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.save_btn = QPushButton("НӘТИЖЕНІ САҚТАУ"); self.save_btn.setFixedHeight(50)
+        self.save_btn.setStyleSheet("background: #00F260; color: black; border-radius: 15px;"); self.save_btn.hide()
+        self.save_btn.clicked.connect(self.handle_save); pl.addWidget(self.save_btn)
+        artic_title = QLabel("АРТИКУЛЯЦИЯ:"); artic_title.setStyleSheet("font-weight: bold; color: #3B82F6; font-size: 14px;"); pl.addWidget(artic_title)
+        pl.addWidget(self.artic_map, alignment=Qt.AlignmentFlag.AlignCenter)
+        kenes_title = QLabel("КЕҢЕС:"); kenes_title.setStyleSheet("font-weight: bold; color: #3B82F6; font-size: 14px;"); pl.addWidget(kenes_title)
+        self.adv_lbl = QLabel(); self.adv_lbl.setWordWrap(True); self.adv_lbl.setStyleSheet("background: #101012; padding: 15px; border-radius: 12px; color: #AAA;")
+        pl.addWidget(self.adv_lbl); pl.addStretch()
+        back = QPushButton("⬅ МЕНЮ"); back.setStyleSheet("background: transparent; color: #666;"); back.clicked.connect(lambda: self.stack.setCurrentIndex(0)); pl.addWidget(back)
+        scroll.setWidget(scroll_widget); panel_layout.addWidget(scroll); al.addWidget(panel_frame, 3)
+        
+        self.history_page = HistoryWindow(lambda: self.stack.setCurrentIndex(0))
+        self.stack.addWidget(menu); self.stack.addWidget(app_page); self.stack.addWidget(self.history_page); self.layout.addWidget(self.stack)
+        self.box.currentIndexChanged.connect(self.on_letter_changed); self.on_letter_changed()
+
+    def show_history(self): self.history_page.refresh(); self.stack.setCurrentIndex(2)
+    def handle_save(self):
+        save_to_db(self.box.currentText(), self.last_final_score)
+        self.save_btn.setText("САҚТАЛДЫ ✓"); self.save_btn.setEnabled(False)
+        QTimer.singleShot(2000, lambda: self.save_btn.hide())
+
+    def on_letter_changed(self):
+        letter = self.box.currentText(); self.adv_lbl.setText(ADVICE_MAP[letter]); self.artic_map.update_map(letter)
+
+    def audio_callback(self, indata, frames, time, status):
+        v = np.linalg.norm(indata) * 10; self.current_vol = min(1.0, v)
+        if self.is_recording: self.audio_data.extend(indata[:,0])
+
+    def toggle_cam(self): self.camera_hidden = not self.camera_hidden
+
+    def draw_ar_visuals(self, frame, pts, w, h):
+        letter = self.box.currentText(); curr_d = abs(pts[13].y - pts[14].y)
+        target_d = TARGET_MOUTH_OPENNESS.get(letter, 0.03); accuracy = max(0, 100 - abs(curr_d - target_d) * 1000)
+        color = (0, 242, 96) if accuracy > 85 else (43, 75, 255)
+        for idx in [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 13, 14]:
+            px, py = int(pts[idx].x * w), int(pts[idx].y * h); cv2.circle(frame, (px, py), 1, color, -1)
+
+    def process_frame(self, frame):
+        frame = cv2.flip(frame, 1); h_f, w_f, _ = frame.shape
+        if self.camera_hidden: 
+            frame[:] = 15
+        else:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB); res = self.face_mesh.process(rgb)
+            if res.multi_face_landmarks:
+                pts = res.multi_face_landmarks[0].landmark; self.draw_ar_visuals(frame, pts, w_f, h_f)
+                d = abs(pts[13].y - pts[14].y)
+                if not self.is_recording: 
+                    self.live_hint.setText("ЖАЗУДЫ БАСТАҢЫЗ")
+                    self.live_hint.setStyleSheet("color: #555; background: #111; border-radius: 10px; padding: 5px;")
+                elif d < TARGET_MOUTH_OPENNESS.get(self.box.currentText(), 0.03) - 0.01: 
+                    self.live_hint.setText("АУЫЗДЫ КЕҢІРЕК АШЫҢЫЗ")
+                    self.live_hint.setStyleSheet("color: #FDC830; background: #111; border-radius: 10px; padding: 5px;")
+                else: 
+                    self.live_hint.setText("КЕРЕМЕТ! ДЫБЫСТАҢЫЗ")
+                    self.live_hint.setStyleSheet("color: #00F260; background: #111; border-radius: 10px; padding: 5px;")
+
+                nose_x, nose_y = pts[1].x * w_f, pts[1].y * h_f; cx, cy, rx, ry = w_f // 2, h_f // 2, 140, 200
+                color_oval = (0, 242, 96) if ((nose_x-cx)**2/rx**2 + (nose_y-cy)**2/ry**2) <= 1 else (43, 75, 255)
+                if self.is_recording: self.lip_activity.append(d)
+                cv2.ellipse(frame, (cx, cy), (rx, ry), 0, 0, 360, color_oval, 2, cv2.LINE_AA)
+        
+        qi = QImage(frame.data, w_f, h_f, w_f * 3, QImage.Format.Format_BGR888)
+        self.v_lbl.setPixmap(QPixmap.fromImage(qi).scaled(self.v_lbl.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding))
+
+    def toggle_rec(self):
+        if self.rec_btn.isChecked():
+            self.is_recording = True; self.rec_btn.setText("ТОҚТАТУ"); self.save_btn.hide()
+            self.audio_data, self.lip_activity = [], []; self.score_ui.set_score(0)
+            self.stream = sd.InputStream(samplerate=16000, channels=1, callback=self.audio_callback); self.stream.start()
+        else:
+            self.is_recording = False; self.rec_btn.setText("ЖАЗУДЫ БАСТАУ")
+            if hasattr(self, 'stream'): self.stream.stop(); self.stream.close()
+            self.calculate()
+
+    def calculate(self):
+        audio_score = 0.0
+        if self.models_loaded and len(self.audio_data) > 1000:
+            try:
+                arr = np.array(self.audio_data, dtype=np.float32); m = np.max(np.abs(arr))
+                if m > 0.01:
+                    arr /= (m + 1e-9); inp = self.processor(arr, sampling_rate=16000, return_tensors="pt")
+                    with torch.no_grad(): e = self.wav2vec(**inp).last_hidden_state.mean(dim=1).numpy().flatten()
+                    audio_score = self.clf_audio.predict_proba([e])[0][self.box.currentIndex()]
+            except: pass
+        if not self.models_loaded: audio_score = min(0.9, np.max(np.abs(self.audio_data)) * 5) if self.audio_data else 0
+        lip_score = min(1.0, np.mean(self.lip_activity) * 15) if self.lip_activity else 0
+        # ТОЧЕЧНАЯ КОРРЕКЦИЯ ДЛЯ БУКВЫ Ә (СНИЖЕНИЕ БАЛЛА ПРИ НЕДОСТАТОЧНОМ ОТКРЫТИИ РТА)
+        if self.box.currentText() == "Ә" and np.mean(self.lip_activity) < 0.05: audio_score *= 0.6
+        
+        final = 0 if audio_score < 0.05 else (audio_score * 0.85 + lip_score * 0.15) * 100
+        self.last_final_score = int(max(0, min(100, final)))
+        self.anim = QVariantAnimation(self); self.anim.setDuration(1800); self.anim.setStartValue(0.0)
+        self.anim.setEndValue(float(self.last_final_score)); self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.anim.valueChanged.connect(self.score_ui.set_score); self.anim.start()
+        self.anim.finished.connect(lambda: self.save_btn.show() if self.last_final_score > 5 else None)
+        self.save_btn.setText("НӘТИЖЕНІ САҚТАУ"); self.save_btn.setEnabled(True)
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv); ex = QazaqAI(); ex.show(); sys.exit(app.exec())

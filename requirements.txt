@@ -1,0 +1,8 @@
+opencv-python
+mediapipe
+torch
+transformers
+sounddevice
+joblib
+PyQt6
+numpy
