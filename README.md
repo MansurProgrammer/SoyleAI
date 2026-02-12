@@ -33,7 +33,8 @@ How to run?
 2. Run the application: `python app.py`
 
 *Note: Ensure the 'assets' folder and model files (.pkl) are in the same directory as app.py.*
-*Note: On the first run, the app will download the Wav2Vec2 base model (approx. 300MB). Please ensure you have a stable internet connection.*
+On the first run, the app will download the Wav2Vec2 base model (approx. 300MB). Please ensure you have a stable internet connection.*
+
 
 
 
