@@ -16,4 +16,13 @@ Visual Tracking: The system keeps track of the user's mouth movements. For insta
 
 Sound Validation: The AI checks the user’s voice against a phonetic model.
 
+
 Smart Feedback: A percentage is provided, as well as specific anatomical feedback (e.g., "Open your mouth wider"). Goal: "Speech Therapist" is used to describe our digital, 24/7 facilitation of students and beginners learning Kazakh through modern technology.
+
+***
+
+How to run?
+1. Install dependencies: `pip install -r requirements.txt`
+2. Run the application: `python app.py`
+
+*Note: Ensure the 'assets' folder and model files (.pkl) are in the same directory as app.py.*
