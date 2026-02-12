@@ -55,20 +55,27 @@ def save_to_db(letter, score):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-# ================== CAMERA THREAD ==================
+# ================== STABLE CAMERA THREAD ==================
 class VideoThread(QThread):
     change_pixmap_signal = pyqtSignal(np.ndarray)
     
+    def __init__(self):
+        super().__init__()
+        self._run_flag = True
+
     def run(self):
         cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        while True:
+        while self._run_flag:
             ret, frame = cap.read()
             if ret:
                 self.change_pixmap_signal.emit(frame)
             else:
-                cap.release()
-                cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-                QThread.msleep(500)
+                self.msleep(10)
+        cap.release()
+
+    def stop(self):
+        self._run_flag = False
+        self.wait()
 
 # ================== UI ELEMENTS ==================
 class HistoryItem(QFrame):
@@ -245,7 +252,8 @@ class SoyleAI(QWidget):
         scroll.setWidget(scroll_widget); panel_layout.addWidget(scroll); al.addWidget(panel_frame, 3)
         
         self.history_page = HistoryWindow(lambda: self.stack.setCurrentIndex(0))
-        self.stack.addWidget(menu); self.stack.addWidget(app_page); self.stack.addWidget(self.history_page); self.layout.addWidget(self.stack)
+        self.stack.addWidget(menu); self.stack.addWidget(app_page); self.stack.addWidget(self.history_page)
+        self.layout.addWidget(self.stack)
         self.box.currentIndexChanged.connect(self.on_letter_changed); self.on_letter_changed()
 
     def show_history(self): self.history_page.refresh(); self.stack.setCurrentIndex(2)
@@ -307,28 +315,66 @@ class SoyleAI(QWidget):
 
     def calculate(self):
         audio_score = 0.0
-        if self.models_loaded and len(self.audio_data) > 1000:
+        if self.models_loaded and len(self.audio_data) > 800:
             try:
-                arr = np.array(self.audio_data, dtype=np.float32); m = np.max(np.abs(arr))
-                if m > 0.01:
-                    arr /= (m + 1e-9); inp = self.processor(arr, sampling_rate=16000, return_tensors="pt")
-                    with torch.no_grad(): e = self.wav2vec(**inp).last_hidden_state.mean(dim=1).numpy().flatten()
-                    audio_score = self.clf_audio.predict_proba([e])[0][self.box.currentIndex()]
+                arr = np.array(self.audio_data, dtype=np.float32)
+                energy = np.abs(arr)
+                mask = energy > (np.max(energy) * 0.1)
+                if np.any(mask):
+                    arr = arr[np.argmax(mask) : len(mask) - np.argmax(mask[::-1])]
+                if len(arr) > 400:
+                    arr = arr / (np.sqrt(np.mean(arr**2)) + 1e-9) * 0.1
+                    inp = self.processor(arr, sampling_rate=16000, return_tensors="pt")
+                    with torch.no_grad():
+                        e = self.wav2vec(**inp).last_hidden_state.mean(dim=1).numpy().flatten()
+                    probs = self.clf_audio.predict_proba([e])[0]
+                    target_idx = self.box.currentIndex()
+                    audio_score = min(1.0, probs[target_idx] * 2.0)
+                    if np.argmax(probs) == target_idx:
+                        audio_score = max(audio_score, 0.93)
             except: pass
-        if not self.models_loaded: audio_score = min(0.9, np.max(np.abs(self.audio_data)) * 5) if self.audio_data else 0
-        lip_score = min(1.0, np.mean(self.lip_activity) * 15) if self.lip_activity else 0
-        if self.box.currentText() == "Ә" and np.mean(self.lip_activity) < 0.05: audio_score *= 0.6
+
+        if not self.models_loaded: 
+            audio_score = min(0.9, np.max(np.abs(self.audio_data)) * 5) if self.audio_data else 0
+
+        lip_avg = np.mean(self.lip_activity) if self.lip_activity else 0
+        target = TARGET_MOUTH_OPENNESS.get(self.box.currentText(), 0.03)
+        lip_score = max(0, 1 - abs(lip_avg - target) / 0.07)
+
+        if self.box.currentText() == "Ә" and lip_avg < 0.045:
+            audio_score *= 0.5
+
+        # ИСХОДНЫЙ РАСЧЕТ
         final = 0 if audio_score < 0.05 else (audio_score * 0.85 + lip_score * 0.15) * 100
+        
+        # --- ЛОГИКА ПЛАВНОГО БОНУСА (35-60%) ---
+        if 35 <= final <= 60:
+            # Масштабируем диапазон 35-60 в 0-1 (t)
+            t = (final - 35) / (60 - 35)
+            # Кривая «колокол»: плавно растет к середине и падает к краям
+            # Используем синус для мягкости: sin(pi * t) дает 0 в 35, 1 в середине и 0 в 60
+            multiplier = np.sin(np.pi * t)
+            final += 25 * multiplier
+        
         self.last_final_score = int(max(0, min(100, final)))
-        self.anim = QVariantAnimation(self); self.anim.setDuration(1800); self.anim.setStartValue(0.0)
-        self.anim.setEndValue(float(self.last_final_score)); self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.anim.valueChanged.connect(self.score_ui.set_score); self.anim.start()
+        
+        self.anim = QVariantAnimation(self)
+        self.anim.setDuration(1800)
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(float(self.last_final_score))
+        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.anim.valueChanged.connect(self.score_ui.set_score)
+        self.anim.start()
+        
         self.anim.finished.connect(lambda: self.save_btn.show() if self.last_final_score > 5 else None)
         self.save_btn.setText("НӘТИЖЕНІ САҚТАУ"); self.save_btn.setEnabled(True)
+
+    def closeEvent(self, event):
+        self.thread.stop()
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     ex = SoyleAI()
     ex.show()
     sys.exit(app.exec())
-
