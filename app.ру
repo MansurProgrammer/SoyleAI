@@ -200,7 +200,7 @@ class SoyleAI(QWidget):
         self.layout = QVBoxLayout(self); self.stack = QStackedWidget()
         
         menu = QWidget(); ml = QVBoxLayout(menu); ml.addStretch(2)
-        title = QLabel("SoyleAI"); title.setStyleSheet("font-size: 90px; font-weight: 900; color: #3B82F6;")
+        title = QLabel("SöyleAI"); title.setStyleSheet("font-size: 90px; font-weight: 900; color: #3B82F6;")
         ml.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
         subtitle = QLabel("Интеллектуалды артикуляция тренажеры"); subtitle.setStyleSheet("color: #666; font-size: 18px; margin-bottom: 30px;")
         ml.addWidget(subtitle, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -331,3 +331,4 @@ if __name__ == "__main__":
     ex = SoyleAI()
     ex.show()
     sys.exit(app.exec())
+
