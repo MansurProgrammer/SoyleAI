@@ -8,11 +8,11 @@ Project Description: Modern language learning tool SoyleAI helps improve the pro
 
 Key Technologies:
 
-Computer Vision (MediaPipe): It uses computer vision to track the facial landmarks in real time and observe the geometry of the lips and the openness of the
-
-Neural Networks (Wav2Vec 2.0): This works by analyzing the signal to ensure phonetic accuracy.
-
-PyQt6: Offers an intuitive interface.
+* **Python 3.11**
+* **Mediapipe** (Face Mesh for lip tracking)
+* **PyTorch & Transformers** (Wav2Vec2 for audio analysis)
+* **Scikit-learn** (Classification models)
+* **PyQt6** (Modern Desktop UI)
 
 ***
 
@@ -31,4 +31,5 @@ How to run?
 2. Run the application: `python app.py`
 
 *Note: Ensure the 'assets' folder and model files (.pkl) are in the same directory as app.py.*
+
 
