@@ -1,8 +1,10 @@
+numpy
 opencv-python
 mediapipe
 torch
-transformers
-sounddevice
+torchvision
+torchaudio
 joblib
+sounddevice
+transformers
 PyQt6
-numpy
