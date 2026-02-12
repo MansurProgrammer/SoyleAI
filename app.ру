@@ -344,7 +344,7 @@ class SoyleAI(QWidget):
         if self.box.currentText() == "Ә" and lip_avg < 0.045:
             audio_score *= 0.5
 
-        # ИСХОДНЫЙ РАСЧЕТ
+        
         final = 0 if audio_score < 0.05 else (audio_score * 0.85 + lip_score * 0.15) * 100
         
         # --- ЛОГИКА ПЛАВНОГО БОНУСА (35-60%) ---
@@ -378,3 +378,4 @@ if __name__ == "__main__":
     ex = SoyleAI()
     ex.show()
     sys.exit(app.exec())
+
