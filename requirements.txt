@@ -1,10 +1,7 @@
-numpy
+PyQt6
 opencv-python
 mediapipe
-torch
-torchvision
-torchaudio
-joblib
+vosk
+librosa
+numpy
 sounddevice
-transformers
-PyQt6
