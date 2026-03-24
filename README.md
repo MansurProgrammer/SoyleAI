@@ -30,7 +30,7 @@ Images adapted from Pronuncian.com for phonetic guidance.
 
 How to run?
 1. Install dependencies: `pip install -r requirements.txt`
-2. Run the application: `python app.py`
+2. Run the application: `python main.py`
 
 *Note: Ensure the 'assets' folder and model files (.pkl) are in the same directory as app.py.*
 *On the first run, the app will download the Wav2Vec2 base model (approx. 300MB). Please ensure you have a stable internet connection.*
